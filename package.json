@@ -1,0 +1,17 @@
+{
+  "name": "mini-vite",
+  "version": "1.0.0",
+  "description": "",
+  "main": "mini-vite.js",
+  "scripts": {
+    "dev": "nodemon mini-vite",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "lxw",
+  "license": "ISC",
+  "devDependencies": {
+    "koa": "^2.13.4",
+    "vue": "^3.2.20"
+  }
+}
