@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const compilerSfc = require("@vue/compiler-sfc"); // 解析SFC单文件的script部分
 const compilerDom = require("@vue/compiler-dom"); // 解析sfc单文件的template部分
+const crypto = require("crypto");
 
 const app = new Koa();
 
@@ -10,8 +11,68 @@ const STARTURL = "http://localhost:3000";
 
 // 使用策略模式，优化对不同模块文件的请求处理代码-todo
 
+/** 获取文件最后修改时间 */
+const getFileUpdatedDate = (path) => {
+  const stats = fs.statSync(path);
+  return stats.mtime.toUTCString();
+};
+
+/** 协商缓存判断返回304还是200
+ *
+ * 头字段ifNoneMatch存在 走etag判断逻辑，和源码唯一hash值进行对比
+ * 头字段ifModifiedSinceh存在 走etag判断逻辑，将使用ifModifiedSince和源码的最后修改时间对比
+ *
+ */
+
+const ifUseCache = (ctx, url, ifNoneMatch, ifModifiedSince) => {
+  let flag = false;
+  // 使用协商缓存
+  ctx.set("Cache-Control", "no-cache");
+  // 设置过期时间在30000毫秒，也就是30秒后
+  //   ctx.set("Expires", new Date(Date.now() + 30000));
+  ctx.set("Cache-Control", "max-age=30");
+  let filePath = url.includes(".vue") ? url : path.join(__dirname, url);
+  if (url === "/") {
+    filePath = path.join(__dirname, "./index.html");
+  }
+  // 获取文件的最后修改时间
+  let fileLastModifiedTime = getFileUpdatedDate(filePath);
+  console.log(fileLastModifiedTime, "lastTime");
+  const buffer = fs.readFileSync(filePath, "utf-8");
+  // 计算请求文件的md5值
+  const hash = crypto.createHash("md5");
+  hash.update(buffer, "utf-8");
+  // 得到etag
+  const etag = `${hash.digest("hex")}`;
+  if (ifNoneMatch === etag) {
+    console.log("走缓存逻辑");
+    ctx.status = 304;
+    ctx.body = "";
+    flag = true;
+  } else {
+    // etag不一致 更新tag值，返回新的资源
+    ctx.set("etag", etag);
+    flag = false;
+  }
+
+  if (!ifNoneMatch && ifModifiedSince === fileLastModifiedTime) {
+    console.log("走缓存逻辑");
+    ctx.status = 304;
+    ctx.body = "";
+    flag = true;
+  } else {
+    // 最后修改时间不一致，更新最后修改时间，返回新的资源
+    ctx.set("Last-Modified", fileLastModifiedTime);
+    flag = false;
+  }
+  return flag;
+};
+
 app.use((ctx) => {
   const { url, query } = ctx.request;
+  // 从请求头字段来读取ifNoneMatch、ifModifiedSince两个字段，用以协商缓存
+  const { "if-none-match": ifNoneMatch, "if-modified-since": ifModifiedSince } =
+    ctx.request.headers;
   const home = fs.readFileSync("./index.html", "utf-8");
   // 路由首页返回，返回html
   if (url === "/") {
@@ -20,7 +81,14 @@ app.use((ctx) => {
   }
   // 解析html里面的其他资源请求，比如js、css
   else if (url.endsWith(".js")) {
-    // 返回js
+    ctx.set("cache-control", "no-cache");
+    // 判断是否读取缓存
+    const used = ifUseCache(ctx, url, ifNoneMatch, ifModifiedSince);
+    if (used) {
+      ctx.status = 304;
+      ctx.body = null;
+      return;
+    }
     const filePath = path.join(__dirname, url); // 获取绝对地址
     const file = fs.readFileSync(filePath, "utf-8");
     ctx.type = "application/javascript";
@@ -42,9 +110,22 @@ app.use((ctx) => {
     const file = fs.readFileSync(filePrefix + "/" + module, "utf-8");
     // 如果里面还要import XXX 再继续替换
     ctx.body = rewirteImport(file);
+    // 依赖使用强缓存
+    ctx.set("cache-control", "max-age=31536000,immutable");
   } else if (url.includes(".vue")) {
     // 获得绝对路劲, url.slice(1)去掉第一个'/',并且只取？之前的路劲
     const filePath = path.resolve(__dirname, url.slice(1).split("?")[0]);
+    const usedCache = ifUseCache(
+      ctx,
+      url.slice(1).split("?")[0],
+      ifNoneMatch,
+      ifModifiedSince
+    );
+    if (usedCache) {
+      ctx.status = 304;
+      ctx.body = null;
+      return;
+    }
     const { descriptor } = compilerSfc.parse(
       fs.readFileSync(filePath, "utf-8")
     );
